@@ -139,6 +139,94 @@ def get_user_id(username_or_id):
     return int(row[0]) if row else None
 
 
+# ---------- Danh sách chặn (từ cấm / sticker set cấm) ----------
+def add_blocked_word(chat_id, word):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""INSERT INTO blocked_words (chat_id, word) VALUES (%s, %s)
+                 ON CONFLICT (chat_id, word) DO NOTHING""", (str(chat_id), word.lower()))
+    conn.commit()
+    conn.close()
+
+
+def remove_blocked_word(chat_id, word):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM blocked_words WHERE chat_id = %s AND word = %s", (str(chat_id), word.lower()))
+    conn.commit()
+    conn.close()
+
+
+def get_blocked_words(chat_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT word FROM blocked_words WHERE chat_id = %s", (str(chat_id),))
+    rows = [r[0] for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+def add_blocked_stickerset(chat_id, set_name):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""INSERT INTO blocked_stickersets (chat_id, set_name) VALUES (%s, %s)
+                 ON CONFLICT (chat_id, set_name) DO NOTHING""", (str(chat_id), set_name.lower()))
+    conn.commit()
+    conn.close()
+
+
+def remove_blocked_stickerset(chat_id, set_name):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM blocked_stickersets WHERE chat_id = %s AND set_name = %s", (str(chat_id), set_name.lower()))
+    conn.commit()
+    conn.close()
+
+
+def get_blocked_stickersets(chat_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT set_name FROM blocked_stickersets WHERE chat_id = %s", (str(chat_id),))
+    rows = [r[0] for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+# ---------- Trạng thái cảnh báo (warn) cho tính năng cấm chat leo thang ----------
+def get_warn_state(user_id, chat_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT warn_count, ban_count FROM warn_state WHERE user_id = %s AND chat_id = %s",
+              (str(user_id), str(chat_id)))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return row[0], row[1]
+    return 0, 0
+
+
+def set_warn_state(user_id, chat_id, warn_count_val, ban_count_val):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO warn_state (user_id, chat_id, warn_count, ban_count)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (user_id, chat_id) DO UPDATE
+        SET warn_count = %s, ban_count = %s
+    """, (str(user_id), str(chat_id), warn_count_val, ban_count_val, warn_count_val, ban_count_val))
+    conn.commit()
+    conn.close()
+
+
+def tinh_so_ngay_cam_chat(ban_count):
+    """ban_count: lần thứ mấy bị cấm chat do warn đầy (1, 2, 3...).
+    Quy tắc: lần 1=3 ngày, lần 2=5, lần 3=7, lần 4=10, sau đó mỗi lần +3 ngày."""
+    bac_thang = [3, 5, 7, 10]
+    if ban_count <= len(bac_thang):
+        return bac_thang[ban_count - 1]
+    return bac_thang[-1] + (ban_count - len(bac_thang)) * 3
+
+
 # ==================== BIẾN TOÀN CỤC (trạng thái trong bộ nhớ) ====================
 # Lưu ý: trên serverless, các biến này KHÔNG đảm bảo giữ nguyên giữa các lần
 # gọi (cold start sẽ reset về rỗng). check_bio_enabled do đó luôn đọc lại
@@ -177,27 +265,66 @@ async def tam_biet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== WARN / BAN / KICK / MUTE ====================
 async def warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.reply_to_message:
-        user = update.message.reply_to_message.from_user
-        uid = user.id
-        mention = get_mention(user)
-        warn_count[uid] = warn_count.get(uid, 0) + 1
-        count = warn_count[uid]
-        if count >= 3:
-            await context.bot.ban_chat_member(update.message.chat_id, uid)
-            await update.message.reply_text(f"🚫 {mention} đã bị ban sau 3 lần cảnh báo!", parse_mode="HTML")
-            warn_count[uid] = 0
-        else:
-            await update.message.reply_text(f"⚠️ {mention} bị cảnh báo lần {count}/3!", parse_mode="HTML")
-    else:
+    if not update.message.reply_to_message:
         await update.message.reply_text("Reply vào tin nhắn người cần cảnh báo!")
+        return
+
+    user = update.message.reply_to_message.from_user
+    uid = user.id
+    chat_id = update.message.chat_id
+    mention = get_mention(user)
+
+    warn_limit = get_setting(chat_id, "warn_limit", 3)
+    cur_warn, cur_ban = get_warn_state(uid, chat_id)
+    cur_warn += 1
+
+    if cur_warn >= warn_limit:
+        # Đầy cảnh báo -> cấm chat leo thang, reset đếm cảnh báo
+        cur_ban += 1
+        so_ngay = tinh_so_ngay_cam_chat(cur_ban)
+        until_date = datetime.datetime.now() + datetime.timedelta(days=so_ngay)
+        try:
+            await context.bot.restrict_chat_member(
+                chat_id, uid,
+                permissions=ChatPermissions(can_send_messages=False),
+                until_date=until_date
+            )
+            save_muted_user(uid, chat_id, user.first_name or "", user.username or "", until_date,
+                             f"Đầy {warn_limit} lần cảnh báo (lần cấm chat thứ {cur_ban})")
+        except Exception:
+            pass
+        set_warn_state(uid, chat_id, 0, cur_ban)
+        await update.message.reply_text(
+            f"🚫 {mention} đã bị <b>cấm chat {so_ngay} ngày</b> sau khi đủ {warn_limit} lần cảnh báo!\n"
+            f"📋 Đây là lần cấm chat thứ {cur_ban} của thành viên này.",
+            parse_mode="HTML"
+        )
+    else:
+        set_warn_state(uid, chat_id, cur_warn, cur_ban)
+        await update.message.reply_text(
+            f"⚠️ {mention} bị cảnh báo lần {cur_warn}/{warn_limit}!",
+            parse_mode="HTML"
+        )
+
+
+async def setwarnlimit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("⚠️ Cách dùng: /setwarnlimit 3  (số lần cảnh báo trước khi bị cấm chat)")
+        return
+    limit = int(context.args[0])
+    if limit < 1:
+        await update.message.reply_text("⚠️ Giới hạn phải từ 1 trở lên!")
+        return
+    save_setting(update.message.chat_id, "warn_limit", limit)
+    await update.message.reply_text(f"✅ Đã đặt giới hạn cảnh báo: {limit} lần!")
 
 
 async def unwarn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.reply_to_message:
         user = update.message.reply_to_message.from_user
         mention = get_mention(user)
-        warn_count[user.id] = 0
+        _, cur_ban = get_warn_state(user.id, update.message.chat_id)
+        set_warn_state(user.id, update.message.chat_id, 0, cur_ban)
         await update.message.reply_text(f"✅ Đã xóa cảnh báo của {mention}!", parse_mode="HTML")
     else:
         await update.message.reply_text("Reply vào tin nhắn người cần xóa cảnh báo!")
@@ -768,6 +895,121 @@ async def kiem_tra_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Lỗi: {e}")
 
 
+# ==================== CLEAN SERVICE (bật/tắt tự xóa tin nhắn lệnh admin) ====================
+async def cleanservice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
+    if not context.args or context.args[0].lower() not in ("on", "off", "yes", "no"):
+        trang_thai = bool(get_setting(chat_id, "clean_service", 1))
+        await update.message.reply_text(
+            f"⚙️ Trạng thái hiện tại: {'BẬT ✅' if trang_thai else 'TẮT ❌'}\n"
+            f"Cách dùng: /cleanservice on hoặc /cleanservice off"
+        )
+        return
+    bat = context.args[0].lower() in ("on", "yes")
+    save_setting(chat_id, "clean_service", 1 if bat else 0)
+    # Không tự xóa tin nhắn lệnh này nếu vừa TẮT tính năng, để admin thấy phản hồi
+    await update.message.reply_text(f"✅ Đã {'bật' if bat else 'tắt'} tự động xóa tin nhắn lệnh admin!")
+
+
+# ==================== BLOCKLIST (từ cấm / bộ sticker cấm) ====================
+async def blockadd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
+
+    # Reply vào 1 sticker -> chặn cả bộ sticker đó
+    if update.message.reply_to_message and update.message.reply_to_message.sticker:
+        set_name = update.message.reply_to_message.sticker.set_name
+        if not set_name:
+            await update.message.reply_text("⚠️ Sticker này không thuộc bộ sticker nào để chặn.")
+            return
+        add_blocked_stickerset(chat_id, set_name)
+        await update.message.reply_text(f"✅ Đã chặn bộ sticker: {set_name}")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "⚠️ Cách dùng:\n"
+            "/blockadd từ1 từ2 ... → chặn từ (tin nhắn chứa từ này sẽ bị xóa)\n"
+            "Reply vào 1 sticker + /blockadd → chặn cả bộ sticker đó"
+        )
+        return
+
+    for tu in context.args:
+        add_blocked_word(chat_id, tu)
+    await update.message.reply_text(f"✅ Đã thêm {len(context.args)} từ vào danh sách cấm!")
+
+
+async def blockdel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
+
+    if update.message.reply_to_message and update.message.reply_to_message.sticker:
+        set_name = update.message.reply_to_message.sticker.set_name
+        if set_name:
+            remove_blocked_stickerset(chat_id, set_name)
+            await update.message.reply_text(f"✅ Đã gỡ chặn bộ sticker: {set_name}")
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ Cách dùng: /blockdel từ1 từ2 ...")
+        return
+
+    for tu in context.args:
+        remove_blocked_word(chat_id, tu)
+    await update.message.reply_text(f"✅ Đã gỡ {len(context.args)} từ khỏi danh sách cấm!")
+
+
+async def blocklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
+    words = get_blocked_words(chat_id)
+    sets = get_blocked_stickersets(chat_id)
+    text = "📋 Danh sách chặn của nhóm:\n\n"
+    text += f"🔤 Từ cấm ({len(words)}): " + (", ".join(words) if words else "(trống)") + "\n\n"
+    text += f"🎭 Bộ sticker cấm ({len(sets)}): " + (", ".join(sets) if sets else "(trống)")
+    await update.message.reply_text(text)
+
+
+# ==================== LỌC TỪ CẤM / STICKER CẤM ====================
+async def loc_noi_dung_cam(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+    msg = update.message
+    chat_id = msg.chat_id
+    user = msg.from_user
+    if not user or user.is_bot:
+        return
+    if msg.chat.type not in ["group", "supergroup"]:
+        return
+
+    # Không kiểm duyệt admin/creator
+    try:
+        member = await context.bot.get_chat_member(chat_id, user.id)
+        if member.status in ["administrator", "creator"]:
+            return
+    except Exception:
+        pass
+
+    vi_pham = False
+
+    if msg.sticker and msg.sticker.set_name:
+        blocked_sets = get_blocked_stickersets(chat_id)
+        if msg.sticker.set_name.lower() in blocked_sets:
+            vi_pham = True
+
+    if not vi_pham and msg.text:
+        blocked_words = get_blocked_words(chat_id)
+        if blocked_words:
+            noi_dung = msg.text.lower()
+            for tu in blocked_words:
+                if tu in noi_dung:
+                    vi_pham = True
+                    break
+
+    if vi_pham:
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
+
 # ==================== HANDLER TỔNG - LƯU TIN NHẮN + NHÓM ====================
 async def xu_ly_moi_tin_nhan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lưu nhóm + user vào DB cho mỗi tin nhắn trong group/supergroup."""
@@ -793,38 +1035,61 @@ async def xu_ly_loi(update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==================== KHỞI TẠO APPLICATION ====================
+def xoa_lenh_sau(func):
+    """Bọc 1 command handler: chạy xong (đã gửi trả lời) rồi xóa tin nhắn
+    lệnh gốc của người dùng, để nhóm gọn hơn — CHỈ khi /cleanservice đang bật
+    (mặc định bật). Im lặng nếu bot không có quyền xóa tin."""
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        result = await func(update, context)
+        try:
+            chat_id = update.message.chat_id
+            if bool(get_setting(chat_id, "clean_service", 1)):
+                await update.message.delete()
+        except Exception:
+            pass
+        return result
+    return wrapper
+
+
 def build_application() -> Application:
     app = Application.builder().token(TOKEN).build()
 
     app.add_error_handler(xu_ly_loi)
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("unmute", unmute))
-    app.add_handler(CommandHandler("mute", mute))
-    app.add_handler(CommandHandler("warn", warn))
-    app.add_handler(CommandHandler("unwarn", unwarn))
-    app.add_handler(CommandHandler("ban", ban))
-    app.add_handler(CommandHandler("unban", unban))
-    app.add_handler(CommandHandler("kick", kick))
+    app.add_handler(CommandHandler("unmute", xoa_lenh_sau(unmute)))
+    app.add_handler(CommandHandler("mute", xoa_lenh_sau(mute)))
+    app.add_handler(CommandHandler("warn", xoa_lenh_sau(warn)))
+    app.add_handler(CommandHandler("unwarn", xoa_lenh_sau(unwarn)))
+    app.add_handler(CommandHandler("ban", xoa_lenh_sau(ban)))
+    app.add_handler(CommandHandler("unban", xoa_lenh_sau(unban)))
+    app.add_handler(CommandHandler("kick", xoa_lenh_sau(kick)))
 
     # Federation
-    app.add_handler(CommandHandler("fban", fban))
-    app.add_handler(CommandHandler("funban", funban))
-    app.add_handler(CommandHandler("fmute", fmute))
-    app.add_handler(CommandHandler("funmute", funmute))
-    app.add_handler(CommandHandler("scanadmin", scan_admin))
+    app.add_handler(CommandHandler("fban", xoa_lenh_sau(fban)))
+    app.add_handler(CommandHandler("funban", xoa_lenh_sau(funban)))
+    app.add_handler(CommandHandler("fmute", xoa_lenh_sau(fmute)))
+    app.add_handler(CommandHandler("funmute", xoa_lenh_sau(funmute)))
+    app.add_handler(CommandHandler("scanadmin", xoa_lenh_sau(scan_admin)))
 
     # Tiện ích
-    app.add_handler(CommandHandler("kiemtra", kiem_tra_db))
-    app.add_handler(CommandHandler("dsmute", ds_mute))
-    app.add_handler(CommandHandler("xoadsmute", xoa_khoi_dsmute))
+    app.add_handler(CommandHandler("kiemtra", xoa_lenh_sau(kiem_tra_db)))
+    app.add_handler(CommandHandler("dsmute", xoa_lenh_sau(ds_mute)))
+    app.add_handler(CommandHandler("xoadsmute", xoa_lenh_sau(xoa_khoi_dsmute)))
+    app.add_handler(CommandHandler("cleanservice", cleanservice))
+    app.add_handler(CommandHandler("setwarnlimit", xoa_lenh_sau(setwarnlimit)))
+
+    # Blocklist (từ cấm / sticker cấm)
+    app.add_handler(CommandHandler("blockadd", xoa_lenh_sau(blockadd)))
+    app.add_handler(CommandHandler("blockdel", xoa_lenh_sau(blockdel)))
+    app.add_handler(CommandHandler("blocklist", blocklist))
 
     # Check bio
-    app.add_handler(CommandHandler("checkbio", check_bio_thu_cong))
-    app.add_handler(CommandHandler("batcheckbio", bat_check_bio))
-    app.add_handler(CommandHandler("tatcheckbio", tat_check_bio))
-    app.add_handler(CommandHandler("uncheckbio", uncheck_bio))
-    app.add_handler(CommandHandler("unmutebio", unmute_bio))
+    app.add_handler(CommandHandler("checkbio", xoa_lenh_sau(check_bio_thu_cong)))
+    app.add_handler(CommandHandler("batcheckbio", xoa_lenh_sau(bat_check_bio)))
+    app.add_handler(CommandHandler("tatcheckbio", xoa_lenh_sau(tat_check_bio)))
+    app.add_handler(CommandHandler("uncheckbio", xoa_lenh_sau(uncheck_bio)))
+    app.add_handler(CommandHandler("unmutebio", xoa_lenh_sau(unmute_bio)))
 
     # Chào mừng / tạm biệt
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, chao_mung))
@@ -832,6 +1097,12 @@ def build_application() -> Application:
 
     # Group 0: check bio khi có tin nhắn text
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_bio_khi_chat), group=0)
+
+    # Group 1: lọc từ cấm / sticker cấm
+    app.add_handler(MessageHandler(
+        (filters.TEXT & ~filters.COMMAND) | filters.Sticker.ALL,
+        loc_noi_dung_cam
+    ), group=1)
 
     # Group 2: lưu nhóm + user (mọi loại tin nhắn)
     app.add_handler(MessageHandler(

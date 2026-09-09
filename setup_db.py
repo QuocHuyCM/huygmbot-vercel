@@ -44,6 +44,31 @@ c.execute("""CREATE TABLE IF NOT EXISTS muted_users (
     PRIMARY KEY (user_id, chat_id)
 )""")
 
+# Cột mới cho settings (dùng ADD COLUMN IF NOT EXISTS để chạy lại an toàn
+# trên DB đã có sẵn dữ liệu, không mất dữ liệu cũ)
+c.execute("ALTER TABLE settings ADD COLUMN IF NOT EXISTS clean_service INTEGER")
+c.execute("ALTER TABLE settings ADD COLUMN IF NOT EXISTS warn_limit INTEGER")
+
+c.execute("""CREATE TABLE IF NOT EXISTS blocked_words (
+    chat_id TEXT,
+    word TEXT,
+    PRIMARY KEY (chat_id, word)
+)""")
+
+c.execute("""CREATE TABLE IF NOT EXISTS blocked_stickersets (
+    chat_id TEXT,
+    set_name TEXT,
+    PRIMARY KEY (chat_id, set_name)
+)""")
+
+c.execute("""CREATE TABLE IF NOT EXISTS warn_state (
+    user_id TEXT,
+    chat_id TEXT,
+    warn_count INTEGER,
+    ban_count INTEGER,
+    PRIMARY KEY (user_id, chat_id)
+)""")
+
 conn.commit()
 conn.close()
-print("✅ Đã tạo xong các bảng trong Supabase.")
+print("✅ Đã tạo/cập nhật xong các bảng trong Supabase.")
