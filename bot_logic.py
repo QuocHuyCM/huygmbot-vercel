@@ -589,7 +589,7 @@ async def check_bio_khi_chat(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     mention = get_mention(user)
-    until_date_bio = datetime.datetime.now() + datetime.timedelta(days=7)
+    until_date_bio = datetime.datetime.now() + datetime.timedelta(days=3)
     try:
         await context.bot.restrict_chat_member(
             chat_id, user.id,
