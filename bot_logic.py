@@ -238,6 +238,25 @@ BIO_CACHE_SECONDS = 300
 
 
 # ==================== HELPER ====================
+def quyen_mo_day_du():
+    """ChatPermissions đầy đủ để unmute — dùng thay cho tham số
+    can_send_media_messages đã bị PTB 21+ loại bỏ, thay bằng khai riêng
+    từng loại media."""
+    return ChatPermissions(
+        can_send_messages=True,
+        can_send_audios=True,
+        can_send_documents=True,
+        can_send_photos=True,
+        can_send_videos=True,
+        can_send_video_notes=True,
+        can_send_voice_notes=True,
+        can_send_polls=True,
+        can_send_other_messages=True,
+        can_add_web_page_previews=True,
+        can_invite_users=True,
+    )
+
+
 def get_mention(user):
     if user.username:
         return f"@{user.username}"
@@ -470,11 +489,7 @@ async def unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mention = get_mention(user)
         await context.bot.restrict_chat_member(
             update.message.chat_id, user.id,
-            permissions=ChatPermissions(
-                can_send_messages=True,
-                can_send_media_messages=True,
-                can_send_other_messages=True
-            )
+            permissions=quyen_mo_day_du()
         )
         remove_muted_user(user.id, update.message.chat_id)
         await update.message.reply_text(f"✅ {mention} đã được unmute!", parse_mode="HTML")
@@ -602,7 +617,7 @@ async def check_bio_khi_chat(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await context.bot.send_message(
         chat_id,
-        f"⚠️ {mention} đã bị mute tự động <b>7 ngày</b>!\n"
+        f"⚠️ {mention} đã bị mute tự động <b>3 ngày</b>!\n"
         f"📋 Lý do: Bio chứa link.\n"
         f"🔗 Bio: <code>{bio[:200]}</code>\n"
         f"💡 Nếu bạn đã gỡ link ở Bio hãy ib admin để được mở mute ngay bây giờ!",
@@ -659,11 +674,7 @@ async def unmute_bio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.restrict_chat_member(
                 cid, uid,
-                permissions=ChatPermissions(
-                    can_send_messages=True,
-                    can_send_media_messages=True,
-                    can_send_other_messages=True
-                )
+                permissions=quyen_mo_day_du()
             )
             remove_muted_user(uid, cid)
             thanh_cong += 1
@@ -829,14 +840,7 @@ async def funmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.restrict_chat_member(
                 cid, user_id,
-                permissions=ChatPermissions(
-                    can_send_messages=True,
-                    can_send_media_messages=True,
-                    can_send_other_messages=True,
-                    can_send_polls=True,
-                    can_add_web_page_previews=True,
-                    can_invite_users=True,
-                )
+                permissions=quyen_mo_day_du()
             )
             remove_muted_user(user_id, cid)
             thanh_cong += 1
