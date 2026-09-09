@@ -264,15 +264,49 @@ async def tam_biet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==================== WARN / BAN / KICK / MUTE ====================
+async def lay_muc_tieu_va_ly_do(update, context):
+    """Xác định người bị nhắm tới + lý do từ 1 trong 2 cách dùng:
+    - Reply vào tin nhắn + /lenh [lý do...]  → toàn bộ args là lý do
+    - /lenh @username [lý do...] hoặc /lenh 123456789 [lý do...]
+    Trả về (user_id, ten_hien_thi, ly_do) — ly_do có thể là None."""
+    if update.message.reply_to_message:
+        user = update.message.reply_to_message.from_user
+        ly_do = " ".join(context.args) if context.args else None
+        return user.id, get_mention(user), ly_do
+
+    if context.args:
+        arg = context.args[0]
+        ly_do = " ".join(context.args[1:]) if len(context.args) > 1 else None
+        if arg.startswith("@") or not arg.lstrip("-").isdigit():
+            uid = get_user_id(arg)
+            if uid:
+                return uid, arg, ly_do
+            try:
+                chat = await context.bot.get_chat(arg)
+                uid = chat.id
+                ten = f"@{chat.username}" if getattr(chat, "username", None) else (chat.first_name or arg)
+                return uid, ten, ly_do
+            except Exception:
+                return None, None, None
+        else:
+            uid = int(arg)
+            return uid, f'<a href="tg://user?id={uid}">{uid}</a>', ly_do
+
+    return None, None, None
+
+
 async def warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.reply_to_message:
-        await update.message.reply_text("Reply vào tin nhắn người cần cảnh báo!")
+    uid, mention, ly_do = await lay_muc_tieu_va_ly_do(update, context)
+    if not uid:
+        await update.message.reply_text(
+            "⚠️ Cách dùng:\n"
+            "Reply vào tin nhắn + /warn [lý do]\n"
+            "Hoặc: /warn @username lý do\n"
+            "Hoặc: /warn 123456789 lý do"
+        )
         return
 
-    user = update.message.reply_to_message.from_user
-    uid = user.id
     chat_id = update.message.chat_id
-    mention = get_mention(user)
 
     warn_limit = get_setting(chat_id, "warn_limit", 3)
     cur_warn, cur_ban = get_warn_state(uid, chat_id)
@@ -283,28 +317,32 @@ async def warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur_ban += 1
         so_ngay = tinh_so_ngay_cam_chat(cur_ban)
         until_date = datetime.datetime.now() + datetime.timedelta(days=so_ngay)
+        ly_do_cam = f"Đầy {warn_limit} lần cảnh báo (lần cấm chat thứ {cur_ban})"
+        if ly_do:
+            ly_do_cam += f" — lần cuối: {ly_do}"
         try:
             await context.bot.restrict_chat_member(
                 chat_id, uid,
                 permissions=ChatPermissions(can_send_messages=False),
                 until_date=until_date
             )
-            save_muted_user(uid, chat_id, user.first_name or "", user.username or "", until_date,
-                             f"Đầy {warn_limit} lần cảnh báo (lần cấm chat thứ {cur_ban})")
+            save_muted_user(uid, chat_id, "", "", until_date, ly_do_cam)
         except Exception:
             pass
         set_warn_state(uid, chat_id, 0, cur_ban)
-        await update.message.reply_text(
+        msg = (
             f"🚫 {mention} đã bị <b>cấm chat {so_ngay} ngày</b> sau khi đủ {warn_limit} lần cảnh báo!\n"
-            f"📋 Đây là lần cấm chat thứ {cur_ban} của thành viên này.",
-            parse_mode="HTML"
+            f"📋 Đây là lần cấm chat thứ {cur_ban} của thành viên này."
         )
+        if ly_do:
+            msg += f"\n📝 Lý do lần này: {ly_do}"
+        await update.message.reply_text(msg, parse_mode="HTML")
     else:
         set_warn_state(uid, chat_id, cur_warn, cur_ban)
-        await update.message.reply_text(
-            f"⚠️ {mention} bị cảnh báo lần {cur_warn}/{warn_limit}!",
-            parse_mode="HTML"
-        )
+        msg = f"⚠️ {mention} bị cảnh báo lần {cur_warn}/{warn_limit}!"
+        if ly_do:
+            msg += f"\n📝 Lý do: {ly_do}"
+        await update.message.reply_text(msg, parse_mode="HTML")
 
 
 async def setwarnlimit(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -928,8 +966,8 @@ async def blockadd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "⚠️ Cách dùng:\n"
-            "/blockadd từ1 từ2 ... → chặn từ (tin nhắn chứa từ này sẽ bị xóa)\n"
-            "Reply vào 1 sticker + /blockadd → chặn cả bộ sticker đó"
+            "/addblocklist từ1 từ2 ... → chặn từ (tin nhắn chứa từ này sẽ bị xóa)\n"
+            "Reply vào 1 sticker + /addblocklist → chặn cả bộ sticker đó"
         )
         return
 
@@ -1080,7 +1118,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("setwarnlimit", xoa_lenh_sau(setwarnlimit)))
 
     # Blocklist (từ cấm / sticker cấm)
-    app.add_handler(CommandHandler("blockadd", xoa_lenh_sau(blockadd)))
+    app.add_handler(CommandHandler("addblocklist", xoa_lenh_sau(blockadd)))
     app.add_handler(CommandHandler("blockdel", xoa_lenh_sau(blockdel)))
     app.add_handler(CommandHandler("blocklist", blocklist))
 
