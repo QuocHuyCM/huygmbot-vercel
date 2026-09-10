@@ -314,25 +314,15 @@ async def lay_muc_tieu_va_ly_do(update, context):
     return None, None, None
 
 
-async def warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid, mention, ly_do = await lay_muc_tieu_va_ly_do(update, context)
-    if not uid:
-        await update.message.reply_text(
-            "⚠️ Cách dùng:\n"
-            "Reply vào tin nhắn + /warn [lý do]\n"
-            "Hoặc: /warn @username lý do\n"
-            "Hoặc: /warn 123456789 lý do"
-        )
-        return
-
-    chat_id = update.message.chat_id
-
+async def ap_dung_canh_bao(context, chat_id, uid, mention, ly_do):
+    """Áp dụng 1 lần cảnh báo cho user: tăng đếm cảnh báo, nếu đủ giới hạn
+    thì tự động cấm chat leo thang (dùng chung cho /warn và /lockurl).
+    Trả về đoạn text (HTML) để gửi thông báo."""
     warn_limit = get_setting(chat_id, "warn_limit", 3)
     cur_warn, cur_ban = get_warn_state(uid, chat_id)
     cur_warn += 1
 
     if cur_warn >= warn_limit:
-        # Đầy cảnh báo -> cấm chat leo thang, reset đếm cảnh báo
         cur_ban += 1
         so_ngay = tinh_so_ngay_cam_chat(cur_ban)
         until_date = datetime.datetime.now() + datetime.timedelta(days=so_ngay)
@@ -355,13 +345,29 @@ async def warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         if ly_do:
             msg += f"\n📝 Lý do lần này: {ly_do}"
-        await update.message.reply_text(msg, parse_mode="HTML")
     else:
         set_warn_state(uid, chat_id, cur_warn, cur_ban)
         msg = f"⚠️ {mention} bị cảnh báo lần {cur_warn}/{warn_limit}!"
         if ly_do:
             msg += f"\n📝 Lý do: {ly_do}"
-        await update.message.reply_text(msg, parse_mode="HTML")
+
+    return msg
+
+
+async def warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid, mention, ly_do = await lay_muc_tieu_va_ly_do(update, context)
+    if not uid:
+        await update.message.reply_text(
+            "⚠️ Cách dùng:\n"
+            "Reply vào tin nhắn + /warn [lý do]\n"
+            "Hoặc: /warn @username lý do\n"
+            "Hoặc: /warn 123456789 lý do"
+        )
+        return
+
+    chat_id = update.message.chat_id
+    msg = await ap_dung_canh_bao(context, chat_id, uid, mention, ly_do)
+    await update.message.reply_text(msg, parse_mode="HTML")
 
 
 async def setwarnlimit(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -604,7 +610,7 @@ async def check_bio_khi_chat(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     mention = get_mention(user)
-    until_date_bio = datetime.datetime.now() + datetime.timedelta(days=3)
+    until_date_bio = datetime.datetime.now() + datetime.timedelta(days=7)
     try:
         await context.bot.restrict_chat_member(
             chat_id, user.id,
@@ -617,7 +623,7 @@ async def check_bio_khi_chat(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await context.bot.send_message(
         chat_id,
-        f"⚠️ {mention} đã bị mute tự động <b>3 ngày</b>!\n"
+        f"⚠️ {mention} đã bị mute tự động <b>7 ngày</b>!\n"
         f"📋 Lý do: Bio chứa link.\n"
         f"🔗 Bio: <code>{bio[:200]}</code>\n"
         f"💡 Nếu bạn đã gỡ link ở Bio hãy ib admin để được mở mute ngay bây giờ!",
@@ -1029,27 +1035,149 @@ async def loc_noi_dung_cam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    vi_pham = False
+    ly_do_xoa = None
 
     if msg.sticker and msg.sticker.set_name:
         blocked_sets = get_blocked_stickersets(chat_id)
         if msg.sticker.set_name.lower() in blocked_sets:
-            vi_pham = True
+            ly_do_xoa = f"bộ sticker bị cấm ({msg.sticker.set_name})"
 
-    if not vi_pham and msg.text:
+    if not ly_do_xoa and msg.text:
         blocked_words = get_blocked_words(chat_id)
         if blocked_words:
             noi_dung = msg.text.lower()
             for tu in blocked_words:
                 if tu in noi_dung:
-                    vi_pham = True
+                    ly_do_xoa = f'từ bị cấm: "{tu}"'
                     break
 
-    if vi_pham:
+    if ly_do_xoa:
+        mention = get_mention(user)
         try:
             await msg.delete()
         except Exception:
             pass
+        try:
+            await context.bot.send_message(
+                chat_id,
+                f"🗑️ Tin nhắn của {mention} đã bị xóa vì chứa {ly_do_xoa}.",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+
+
+# ==================== LOCKURL (cảnh báo nội dung bị khóa) ====================
+def phat_hien_noi_dung_khoa(msg):
+    """Trả về danh sách (tiếng Việt) các loại nội dung bị khóa mà tin nhắn
+    này chứa, dùng cho /lockurl. Rỗng nếu không vi phạm gì."""
+    ly_do = []
+    text = msg.text or msg.caption or ""
+    entities = list(msg.entities or []) + list(msg.caption_entities or [])
+
+    co_link = False
+    co_email = False
+    co_phone = False
+    co_command = False
+    co_bot_mention = False
+
+    for e in entities:
+        if e.type in ("url", "text_link"):
+            co_link = True
+        elif e.type == "email":
+            co_email = True
+        elif e.type == "phone_number":
+            co_phone = True
+        elif e.type == "bot_command":
+            co_command = True
+        elif e.type == "mention":
+            doan = text[e.offset:e.offset + e.length]
+            if doan.lower().endswith("bot"):
+                co_bot_mention = True
+        elif e.type == "text_mention":
+            if getattr(e.user, "is_bot", False):
+                co_bot_mention = True
+
+    if co_link:
+        ly_do.append("link")
+    if co_email:
+        ly_do.append("email")
+    if co_phone:
+        ly_do.append("số điện thoại")
+    if co_command:
+        ly_do.append("lệnh (command)")
+    if co_bot_mention:
+        ly_do.append("nhắc tên bot khác")
+
+    if getattr(msg, "location", None):
+        ly_do.append("vị trí (location)")
+    if getattr(msg, "venue", None):
+        ly_do.append("địa điểm (venue)")
+    if getattr(msg, "contact", None):
+        ly_do.append("danh bạ (contact)")
+    if getattr(msg, "forward_origin", None) or getattr(msg, "forward_date", None):
+        ly_do.append("tin nhắn chuyển tiếp (forward)")
+    if getattr(msg, "game", None):
+        ly_do.append("game")
+    if getattr(msg, "reply_markup", None):
+        ly_do.append("nút bấm (button)")
+
+    # Ký tự điều khiển RTL — thường dùng để ngụy trang link/từ cấm
+    if text and any(ch in text for ch in ("\u202e", "\u202b", "\u200f", "\u061c")):
+        ly_do.append("ký tự RTL bất thường")
+
+    return ly_do
+
+
+async def lockurl_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
+    if not context.args or context.args[0].lower() not in ("on", "off", "yes", "no"):
+        trang_thai = bool(get_setting(chat_id, "lock_url", 0))
+        await update.message.reply_text(
+            f"⚙️ Trạng thái /lockurl hiện tại: {'BẬT ✅' if trang_thai else 'TẮT ❌'}\n"
+            f"Cách dùng: /lockurl on hoặc /lockurl off\n\n"
+            f"Khi bật, thành viên (không áp dụng cho admin) gửi link, sđt, địa chỉ, "
+            f"location, contact, forward, email, command, button, hoặc nhắc tên bot khác "
+            f"sẽ bị bot cảnh báo (áp dụng chung với giới hạn của /setwarnlimit)."
+        )
+        return
+    bat = context.args[0].lower() in ("on", "yes")
+    save_setting(chat_id, "lock_url", 1 if bat else 0)
+    await update.message.reply_text(f"✅ Đã {'bật' if bat else 'tắt'} /lockurl!")
+
+
+async def lockurl_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+    msg = update.message
+    chat_id = msg.chat_id
+    user = msg.from_user
+    if not user or user.is_bot:
+        return
+    if msg.chat.type not in ["group", "supergroup"]:
+        return
+
+    if not bool(get_setting(chat_id, "lock_url", 0)):
+        return
+
+    try:
+        member = await context.bot.get_chat_member(chat_id, user.id)
+        if member.status in ["administrator", "creator"]:
+            return
+    except Exception:
+        pass
+
+    danh_sach_vi_pham = phat_hien_noi_dung_khoa(msg)
+    if not danh_sach_vi_pham:
+        return
+
+    mention = get_mention(user)
+    ly_do = "Gửi nội dung bị khóa (/lockurl): " + ", ".join(danh_sach_vi_pham)
+    canh_bao_msg = await ap_dung_canh_bao(context, chat_id, user.id, mention, ly_do)
+    try:
+        await context.bot.send_message(chat_id, canh_bao_msg, parse_mode="HTML")
+    except Exception:
+        pass
 
 
 # ==================== HANDLER TỔNG - LƯU TIN NHẮN + NHÓM ====================
@@ -1120,6 +1248,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("xoadsmute", xoa_lenh_sau(xoa_khoi_dsmute)))
     app.add_handler(CommandHandler("cleanservice", cleanservice))
     app.add_handler(CommandHandler("setwarnlimit", xoa_lenh_sau(setwarnlimit)))
+    app.add_handler(CommandHandler("lockurl", lockurl_toggle))
 
     # Blocklist (từ cấm / sticker cấm)
     app.add_handler(CommandHandler("addblocklist", xoa_lenh_sau(blockadd)))
@@ -1145,6 +1274,9 @@ def build_application() -> Application:
         (filters.TEXT & ~filters.COMMAND) | filters.Sticker.ALL,
         loc_noi_dung_cam
     ), group=1)
+
+    # Group 1: /lockurl — kiểm tra link/sđt/location/contact/forward/email/command/button/bot
+    app.add_handler(MessageHandler(filters.ALL, lockurl_check), group=1)
 
     # Group 2: lưu nhóm + user (mọi loại tin nhắn)
     app.add_handler(MessageHandler(

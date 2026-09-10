@@ -48,6 +48,7 @@ c.execute("""CREATE TABLE IF NOT EXISTS muted_users (
 # trên DB đã có sẵn dữ liệu, không mất dữ liệu cũ)
 c.execute("ALTER TABLE settings ADD COLUMN IF NOT EXISTS clean_service INTEGER")
 c.execute("ALTER TABLE settings ADD COLUMN IF NOT EXISTS warn_limit INTEGER")
+c.execute("ALTER TABLE settings ADD COLUMN IF NOT EXISTS lock_url INTEGER")
 
 c.execute("""CREATE TABLE IF NOT EXISTS blocked_words (
     chat_id TEXT,
