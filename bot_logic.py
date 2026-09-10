@@ -1275,15 +1275,18 @@ def build_application() -> Application:
         loc_noi_dung_cam
     ), group=1)
 
-    # Group 1: /lockurl — kiểm tra link/sđt/location/contact/forward/email/command/button/bot
-    app.add_handler(MessageHandler(filters.ALL, lockurl_check), group=1)
+    # Group 2: /lockurl — kiểm tra link/sđt/location/contact/forward/email/command/button/bot
+    # (Phải để RIÊNG nhóm khác với group 1: PTB chỉ chạy handler ĐẦU TIÊN khớp trong
+    # cùng 1 group rồi dừng, nên nếu chung group với loc_noi_dung_cam thì lockurl_check
+    # sẽ không bao giờ được gọi với tin nhắn text.)
+    app.add_handler(MessageHandler(filters.ALL, lockurl_check), group=2)
 
-    # Group 2: lưu nhóm + user (mọi loại tin nhắn)
+    # Group 3: lưu nhóm + user (mọi loại tin nhắn)
     app.add_handler(MessageHandler(
         filters.TEXT | filters.PHOTO | filters.Sticker.ALL |
         filters.Document.ALL | filters.VIDEO | filters.AUDIO | filters.VOICE,
         xu_ly_moi_tin_nhan
-    ), group=2)
+    ), group=3)
 
     return app
 
