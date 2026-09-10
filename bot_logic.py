@@ -1,6 +1,6 @@
 import os
 import datetime
-from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup, User
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     filters, ContextTypes
@@ -173,6 +173,32 @@ def get_selected_admins(chat_id):
     rows = c.fetchall()
     conn.close()
     return rows
+
+
+def toggle_selected_admin_and_get_all(chat_id, user_id, first_name, username):
+    """Bật/tắt 1 admin VÀ trả về toàn bộ tập id đang được chọn sau khi đổi —
+    tất cả trong CÙNG 1 kết nối DB (nhanh hơn mở riêng 2 kết nối).
+    Trả về (set các id đang chọn, True/False admin này vừa được chọn hay bỏ)."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT user_id FROM selected_admins WHERE chat_id = %s", (str(chat_id),))
+    ids = {int(r[0]) for r in c.fetchall()}
+    if user_id in ids:
+        c.execute("DELETE FROM selected_admins WHERE chat_id = %s AND user_id = %s",
+                   (str(chat_id), str(user_id)))
+        ids.discard(user_id)
+        dang_duoc_chon = False
+    else:
+        c.execute("""INSERT INTO selected_admins (chat_id, user_id, first_name, username)
+                     VALUES (%s, %s, %s, %s)
+                     ON CONFLICT (chat_id, user_id) DO UPDATE
+                     SET first_name = %s, username = %s""",
+                   (str(chat_id), str(user_id), first_name, username, first_name, username))
+        ids.add(user_id)
+        dang_duoc_chon = True
+    conn.commit()
+    conn.close()
+    return ids, dang_duoc_chon
 
 
 def get_user_id(username_or_id):
@@ -360,12 +386,27 @@ async def lay_muc_tieu_va_ly_do(update, context):
     return None, None, None
 
 
+def lay_gioi_han_va_trang_thai_canh_bao(chat_id, uid):
+    """Đọc warn_limit (từ settings) VÀ trạng thái cảnh báo hiện tại (từ
+    warn_state) trong CÙNG 1 kết nối DB, thay vì 2 kết nối riêng."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT warn_limit FROM settings WHERE chat_id = %s", (str(chat_id),))
+    row = c.fetchone()
+    warn_limit = row[0] if row and row[0] is not None else 3
+    c.execute("SELECT warn_count, ban_count FROM warn_state WHERE user_id = %s AND chat_id = %s",
+              (str(uid), str(chat_id)))
+    row2 = c.fetchone()
+    cur_warn, cur_ban = (row2[0], row2[1]) if row2 else (0, 0)
+    conn.close()
+    return warn_limit, cur_warn, cur_ban
+
+
 async def ap_dung_canh_bao(context, chat_id, uid, mention, ly_do):
     """Áp dụng 1 lần cảnh báo cho user: tăng đếm cảnh báo, nếu đủ giới hạn
     thì tự động cấm chat leo thang (dùng chung cho /warn và /lockurl).
     Trả về đoạn text (HTML) để gửi thông báo."""
-    warn_limit = get_setting(chat_id, "warn_limit", 3)
-    cur_warn, cur_ban = get_warn_state(uid, chat_id)
+    warn_limit, cur_warn, cur_ban = lay_gioi_han_va_trang_thai_canh_bao(chat_id, uid)
     cur_warn += 1
 
     if cur_warn >= warn_limit:
@@ -443,14 +484,20 @@ async def setbiomutedays(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Đã đặt thời gian mute do bio chứa link: {so_ngay} ngày!")
 
 
-def build_admin_picker_keyboard(chat_id, admin_users):
+def _ve_ban_phim_chon_admin(admin_users, da_chon_ids):
     rows = []
     for u in admin_users:
-        da_chon = is_admin_selected(chat_id, u.id)
+        da_chon = u.id in da_chon_ids
         nhan = ("✅ " if da_chon else "◻️ ") + (f"@{u.username}" if u.username else (u.first_name or str(u.id)))
         rows.append([InlineKeyboardButton(nhan, callback_data=f"admtoggle:{u.id}")])
     rows.append([InlineKeyboardButton("✅ Xong", callback_data="admdone")])
     return InlineKeyboardMarkup(rows)
+
+
+def build_admin_picker_keyboard(chat_id, admin_users):
+    da_chon_rows = get_selected_admins(chat_id)
+    da_chon_ids = {int(row[0]) for row in da_chon_rows}
+    return _ve_ban_phim_chon_admin(admin_users, da_chon_ids)
 
 
 async def setadmincount(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -489,15 +536,6 @@ async def xu_ly_nut_chon_admin(update: Update, context: ContextTypes.DEFAULT_TYP
     if not query.data.startswith("admtoggle:"):
         return
 
-    # Chỉ admin của nhóm mới được chỉnh danh sách này
-    try:
-        member = await context.bot.get_chat_member(chat_id, query.from_user.id)
-        if member.status not in ["administrator", "creator"]:
-            await query.answer("⚠️ Chỉ admin mới chỉnh được danh sách này!", show_alert=True)
-            return
-    except Exception:
-        pass
-
     target_id = int(query.data.split(":", 1)[1])
 
     try:
@@ -505,18 +543,29 @@ async def xu_ly_nut_chon_admin(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception:
         await query.answer("⚠️ Lỗi khi tải danh sách admin, thử lại sau!", show_alert=True)
         return
+
+    admin_ids = {a.user.id for a in admins}
+    if query.from_user.id not in admin_ids:
+        await query.answer("⚠️ Chỉ admin mới chỉnh được danh sách này!", show_alert=True)
+        return
+
     ds_admin = [a.user for a in admins if not a.user.is_bot]
     target_user = next((u for u in ds_admin if u.id == target_id), None)
     if not target_user:
         await query.answer("⚠️ Người này không còn là admin của nhóm!", show_alert=True)
         return
 
-    dang_duoc_chon = toggle_selected_admin(
-        chat_id, target_user.id, target_user.first_name or "", target_user.username or ""
-    )
+    try:
+        da_chon_ids, dang_duoc_chon = toggle_selected_admin_and_get_all(
+            chat_id, target_user.id, target_user.first_name or "", target_user.username or ""
+        )
+    except Exception as e:
+        print(f"Lỗi khi toggle admin: {e}")
+        await query.answer("⚠️ Có lỗi khi lưu lựa chọn, thử lại sau!", show_alert=True)
+        return
     await query.answer("Đã chọn!" if dang_duoc_chon else "Đã bỏ chọn!")
 
-    kb = build_admin_picker_keyboard(chat_id, ds_admin)
+    kb = _ve_ban_phim_chon_admin(ds_admin, da_chon_ids)
     try:
         await query.edit_message_reply_markup(reply_markup=kb)
     except Exception:
@@ -1489,11 +1538,24 @@ def build_application() -> Application:
     return app
 
 
+# Bot ID nằm sẵn trong TOKEN (phần trước dấu ":") — dùng để bỏ qua lệnh gọi
+# get_me() bắt buộc mà PTB thực hiện mỗi lần initialize(), tiết kiệm 1 lượt
+# gọi API Telegram (~100-400ms) cho MỌI update, vì token đã được xác nhận
+# hợp lệ từ những lần chạy trước rồi, không cần xác thực lại mỗi lần.
+_BOT_ID = int(TOKEN.split(":")[0])
+_CACHED_BOT_USER = User(id=_BOT_ID, is_bot=True, first_name="Bot")
+
+
 async def process_update(update_data: dict):
     """Xử lý 1 update Telegram nhận qua webhook. Tạo Application mới,
     khởi tạo, xử lý, rồi đóng lại — an toàn trong 1 event loop duy nhất
     (tránh lỗi mixing event loop giữa các lần gọi serverless)."""
     app = build_application()
+
+    async def _bo_qua_get_me(*args, **kwargs):
+        return _CACHED_BOT_USER
+    app.bot.get_me = _bo_qua_get_me
+
     async with app:
         update = Update.de_json(update_data, app.bot)
         await app.process_update(update)
