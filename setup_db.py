@@ -49,6 +49,8 @@ c.execute("""CREATE TABLE IF NOT EXISTS muted_users (
 c.execute("ALTER TABLE settings ADD COLUMN IF NOT EXISTS clean_service INTEGER")
 c.execute("ALTER TABLE settings ADD COLUMN IF NOT EXISTS warn_limit INTEGER")
 c.execute("ALTER TABLE settings ADD COLUMN IF NOT EXISTS lock_url INTEGER")
+c.execute("ALTER TABLE settings ADD COLUMN IF NOT EXISTS bio_mute_days INTEGER")
+c.execute("ALTER TABLE settings ADD COLUMN IF NOT EXISTS admin_show_count INTEGER")
 
 c.execute("""CREATE TABLE IF NOT EXISTS blocked_words (
     chat_id TEXT,
@@ -68,6 +70,14 @@ c.execute("""CREATE TABLE IF NOT EXISTS warn_state (
     warn_count INTEGER,
     ban_count INTEGER,
     PRIMARY KEY (user_id, chat_id)
+)""")
+
+c.execute("""CREATE TABLE IF NOT EXISTS selected_admins (
+    chat_id TEXT,
+    user_id TEXT,
+    first_name TEXT,
+    username TEXT,
+    PRIMARY KEY (chat_id, user_id)
 )""")
 
 conn.commit()

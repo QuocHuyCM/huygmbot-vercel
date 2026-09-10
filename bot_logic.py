@@ -1,7 +1,10 @@
 import os
 import datetime
-from telegram import Update, ChatPermissions
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    filters, ContextTypes
+)
 from telegram.error import BadRequest, Forbidden
 
 import psycopg2
@@ -124,6 +127,49 @@ def get_muted_users(chat_id=None):
     else:
         c.execute("""SELECT user_id, chat_id, first_name, username, until_date, ly_do
                      FROM muted_users""")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+# ---------- Danh sách admin được chọn để hiển thị (nút "Tôi đã gỡ link") ----------
+def is_admin_selected(chat_id, user_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM selected_admins WHERE chat_id = %s AND user_id = %s",
+              (str(chat_id), str(user_id)))
+    row = c.fetchone()
+    conn.close()
+    return row is not None
+
+
+def toggle_selected_admin(chat_id, user_id, first_name, username):
+    """Bật/tắt 1 admin trong danh sách hiển thị. Trả về True nếu SAU khi
+    toggle, admin này đang được chọn (False nếu vừa bị bỏ chọn)."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM selected_admins WHERE chat_id = %s AND user_id = %s",
+              (str(chat_id), str(user_id)))
+    da_ton_tai = c.fetchone() is not None
+    if da_ton_tai:
+        c.execute("DELETE FROM selected_admins WHERE chat_id = %s AND user_id = %s",
+                   (str(chat_id), str(user_id)))
+    else:
+        c.execute("""INSERT INTO selected_admins (chat_id, user_id, first_name, username)
+                     VALUES (%s, %s, %s, %s)
+                     ON CONFLICT (chat_id, user_id) DO UPDATE
+                     SET first_name = %s, username = %s""",
+                   (str(chat_id), str(user_id), first_name, username, first_name, username))
+    conn.commit()
+    conn.close()
+    return not da_ton_tai
+
+
+def get_selected_admins(chat_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT user_id, first_name, username FROM selected_admins WHERE chat_id = %s",
+              (str(chat_id),))
     rows = c.fetchall()
     conn.close()
     return rows
@@ -382,6 +428,144 @@ async def setwarnlimit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Đã đặt giới hạn cảnh báo: {limit} lần!")
 
 
+async def setbiomutedays(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text(
+            f"⚠️ Cách dùng: /setbiomutedays 3  (số ngày mute khi bio chứa link)\n"
+            f"Hiện tại: {get_setting(update.message.chat_id, 'bio_mute_days', 3)} ngày"
+        )
+        return
+    so_ngay = int(context.args[0])
+    if so_ngay < 1:
+        await update.message.reply_text("⚠️ Số ngày phải từ 1 trở lên!")
+        return
+    save_setting(update.message.chat_id, "bio_mute_days", so_ngay)
+    await update.message.reply_text(f"✅ Đã đặt thời gian mute do bio chứa link: {so_ngay} ngày!")
+
+
+def build_admin_picker_keyboard(chat_id, admin_users):
+    rows = []
+    for u in admin_users:
+        da_chon = is_admin_selected(chat_id, u.id)
+        nhan = ("✅ " if da_chon else "◻️ ") + (f"@{u.username}" if u.username else (u.first_name or str(u.id)))
+        rows.append([InlineKeyboardButton(nhan, callback_data=f"admtoggle:{u.id}")])
+    rows.append([InlineKeyboardButton("✅ Xong", callback_data="admdone")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def setadmincount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
+    try:
+        admins = await context.bot.get_chat_administrators(chat_id)
+    except Exception:
+        await update.message.reply_text("⚠️ Không lấy được danh sách admin của nhóm!")
+        return
+    ds_admin = [a.user for a in admins if not a.user.is_bot]
+    if not ds_admin:
+        await update.message.reply_text("⚠️ Nhóm chưa có admin nào (ngoài bot)!")
+        return
+    kb = build_admin_picker_keyboard(chat_id, ds_admin)
+    await update.message.reply_text(
+        "👮 Chọn các admin sẽ hiện ra khi thành viên bấm nút \"Tôi đã gỡ link\":\n"
+        "Bấm vào tên để chọn/bỏ chọn, bấm ✅ Xong khi hoàn tất.",
+        reply_markup=kb
+    )
+
+
+async def xu_ly_nut_chon_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    chat_id = query.message.chat_id
+
+    if query.data == "admdone":
+        await query.answer("Đã lưu danh sách admin!")
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
+
+    if not query.data.startswith("admtoggle:"):
+        return
+
+    # Chỉ admin của nhóm mới được chỉnh danh sách này
+    try:
+        member = await context.bot.get_chat_member(chat_id, query.from_user.id)
+        if member.status not in ["administrator", "creator"]:
+            await query.answer("⚠️ Chỉ admin mới chỉnh được danh sách này!", show_alert=True)
+            return
+    except Exception:
+        pass
+
+    target_id = int(query.data.split(":", 1)[1])
+
+    try:
+        admins = await context.bot.get_chat_administrators(chat_id)
+    except Exception:
+        await query.answer("⚠️ Lỗi khi tải danh sách admin, thử lại sau!", show_alert=True)
+        return
+    ds_admin = [a.user for a in admins if not a.user.is_bot]
+    target_user = next((u for u in ds_admin if u.id == target_id), None)
+    if not target_user:
+        await query.answer("⚠️ Người này không còn là admin của nhóm!", show_alert=True)
+        return
+
+    dang_duoc_chon = toggle_selected_admin(
+        chat_id, target_user.id, target_user.first_name or "", target_user.username or ""
+    )
+    await query.answer("Đã chọn!" if dang_duoc_chon else "Đã bỏ chọn!")
+
+    kb = build_admin_picker_keyboard(chat_id, ds_admin)
+    try:
+        await query.edit_message_reply_markup(reply_markup=kb)
+    except Exception:
+        pass
+
+
+async def xu_ly_nut_da_go_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.data or not query.data.startswith("biolink:"):
+        return
+
+    uid_trong_nut = int(query.data.split(":", 1)[1])
+    if query.from_user.id != uid_trong_nut:
+        await query.answer("⚠️ Chỉ người bị mute mới bấm được nút này!", show_alert=True)
+        return
+
+    chat_id = query.message.chat_id
+
+    da_chon = get_selected_admins(chat_id)
+    if da_chon:
+        ds_hien = [(uid, fname, uname) for uid, fname, uname in da_chon]
+    else:
+        so_luong = get_setting(chat_id, "admin_show_count", 5)
+        try:
+            admins = await context.bot.get_chat_administrators(chat_id)
+        except Exception:
+            await query.answer("⚠️ Không lấy được danh sách admin, thử lại sau!", show_alert=True)
+            return
+        ds_hien = [
+            (a.user.id, a.user.first_name or "", a.user.username or "")
+            for a in admins if not a.user.is_bot
+        ][:so_luong]
+
+    if not ds_hien:
+        await query.answer("⚠️ Nhóm chưa có admin nào được ghi nhận!", show_alert=True)
+        return
+
+    text = "👮 Liên hệ admin để được mở mute:\n\n"
+    for uid, fname, uname in ds_hien:
+        mention = f"@{uname}" if uname else f'<a href="tg://user?id={uid}">{fname or uid}</a>'
+        text += f"• {mention}\n"
+
+    await query.answer()
+    try:
+        await context.bot.send_message(chat_id, text, parse_mode="HTML")
+    except Exception:
+        pass
+
+
 async def unwarn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.reply_to_message:
         user = update.message.reply_to_message.from_user
@@ -610,7 +794,8 @@ async def check_bio_khi_chat(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     mention = get_mention(user)
-    until_date_bio = datetime.datetime.now() + datetime.timedelta(days=3)
+    so_ngay_mute_bio = get_setting(chat_id, "bio_mute_days", 3)
+    until_date_bio = datetime.datetime.now() + datetime.timedelta(days=so_ngay_mute_bio)
     try:
         await context.bot.restrict_chat_member(
             chat_id, user.id,
@@ -621,13 +806,18 @@ async def check_bio_khi_chat(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception:
         pass
 
+    ban_phim = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Tôi đã gỡ link", callback_data=f"biolink:{user.id}")
+    ]])
+
     await context.bot.send_message(
         chat_id,
-        f"⚠️ {mention} đã bị mute tự động <b>3 ngày</b>!\n"
+        f"⚠️ {mention} đã bị mute tự động <b>{so_ngay_mute_bio} ngày</b>!\n"
         f"📋 Lý do: Bio chứa link.\n"
         f"🔗 Bio: <code>{bio[:200]}</code>\n"
-        f"💡 Nếu bạn đã gỡ link ở Bio hãy ib admin để được mở mute ngay bây giờ!",
-        parse_mode="HTML"
+        f"💡 Nếu bạn đã gỡ link ở Bio, bấm nút bên dưới để xem danh sách admin liên hệ mở mute.",
+        parse_mode="HTML",
+        reply_markup=ban_phim
     )
 
 
@@ -1249,6 +1439,14 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("cleanservice", cleanservice))
     app.add_handler(CommandHandler("setwarnlimit", xoa_lenh_sau(setwarnlimit)))
     app.add_handler(CommandHandler("lockurl", lockurl_toggle))
+    app.add_handler(CommandHandler("setbiomutedays", xoa_lenh_sau(setbiomutedays)))
+    app.add_handler(CommandHandler("setadmincount", xoa_lenh_sau(setadmincount)))
+
+    # Nút "Tôi đã gỡ link" dưới thông báo mute do check bio
+    app.add_handler(CallbackQueryHandler(xu_ly_nut_da_go_link, pattern=r"^biolink:"))
+
+    # Nút chọn admin trong /setadmincount
+    app.add_handler(CallbackQueryHandler(xu_ly_nut_chon_admin, pattern=r"^admtoggle:|^admdone$"))
 
     # Blocklist (từ cấm / sticker cấm)
     app.add_handler(CommandHandler("addblocklist", xoa_lenh_sau(blockadd)))
