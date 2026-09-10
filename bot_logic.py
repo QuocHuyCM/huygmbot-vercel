@@ -610,7 +610,7 @@ async def check_bio_khi_chat(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     mention = get_mention(user)
-    until_date_bio = datetime.datetime.now() + datetime.timedelta(days=7)
+    until_date_bio = datetime.datetime.now() + datetime.timedelta(days=3)
     try:
         await context.bot.restrict_chat_member(
             chat_id, user.id,
@@ -623,7 +623,7 @@ async def check_bio_khi_chat(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await context.bot.send_message(
         chat_id,
-        f"⚠️ {mention} đã bị mute tự động <b>7 ngày</b>!\n"
+        f"⚠️ {mention} đã bị mute tự động <b>3 ngày</b>!\n"
         f"📋 Lý do: Bio chứa link.\n"
         f"🔗 Bio: <code>{bio[:200]}</code>\n"
         f"💡 Nếu bạn đã gỡ link ở Bio hãy ib admin để được mở mute ngay bây giờ!",
