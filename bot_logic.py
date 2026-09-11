@@ -1542,8 +1542,21 @@ def build_application() -> Application:
 # get_me() bắt buộc mà PTB thực hiện mỗi lần initialize(), tiết kiệm 1 lượt
 # gọi API Telegram (~100-400ms) cho MỌI update, vì token đã được xác nhận
 # hợp lệ từ những lần chạy trước rồi, không cần xác thực lại mỗi lần.
+#
+# QUAN TRỌNG: Bot/ExtBot dùng __slots__ nên KHÔNG thể gán đè get_me lên
+# từng instance (sẽ báo lỗi "Attribute 'get_me' ... can't be set"). Phải vá
+# ở cấp CLASS (telegram.Bot), làm 1 lần duy nhất lúc module được import.
 _BOT_ID = int(TOKEN.split(":")[0])
 _CACHED_BOT_USER = User(id=_BOT_ID, is_bot=True, first_name="Bot")
+
+
+async def _bo_qua_get_me(self, *args, **kwargs):
+    self._bot_user = _CACHED_BOT_USER
+    return _CACHED_BOT_USER
+
+
+from telegram import Bot as _TelegramBot  # noqa: E402
+_TelegramBot.get_me = _bo_qua_get_me
 
 
 async def process_update(update_data: dict):
@@ -1551,11 +1564,6 @@ async def process_update(update_data: dict):
     khởi tạo, xử lý, rồi đóng lại — an toàn trong 1 event loop duy nhất
     (tránh lỗi mixing event loop giữa các lần gọi serverless)."""
     app = build_application()
-
-    async def _bo_qua_get_me(*args, **kwargs):
-        return _CACHED_BOT_USER
-    app.bot.get_me = _bo_qua_get_me
-
     async with app:
         update = Update.de_json(update_data, app.bot)
         await app.process_update(update)
