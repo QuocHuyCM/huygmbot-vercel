@@ -1,6 +1,6 @@
 import os
 import datetime
-from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup, User
+from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     filters, ContextTypes
@@ -1538,25 +1538,33 @@ def build_application() -> Application:
     return app
 
 
-# Bot ID nằm sẵn trong TOKEN (phần trước dấu ":") — dùng để bỏ qua lệnh gọi
-# get_me() bắt buộc mà PTB thực hiện mỗi lần initialize(), tiết kiệm 1 lượt
-# gọi API Telegram (~100-400ms) cho MỌI update, vì token đã được xác nhận
-# hợp lệ từ những lần chạy trước rồi, không cần xác thực lại mỗi lần.
+# Tối ưu: gọi get_me() THẬT 1 lần đầu tiên (để có đúng id/username thật của
+# bot), rồi LƯU LẠI ở biến module-level. Vercel thường tái sử dụng lại cùng
+# 1 tiến trình ("container ấm") cho các request đến gần nhau, nên những lần
+# gọi sau trong CÙNG tiến trình đó sẽ dùng lại kết quả đã lưu, không cần gọi
+# mạng lại — vẫn đảm bảo dữ liệu chính xác 100% (khác với việc tự bịa dữ
+# liệu giả, từng gây lỗi "username thật cần để so khớp lệnh").
 #
 # QUAN TRỌNG: Bot/ExtBot dùng __slots__ nên KHÔNG thể gán đè get_me lên
 # từng instance (sẽ báo lỗi "Attribute 'get_me' ... can't be set"). Phải vá
 # ở cấp CLASS (telegram.Bot), làm 1 lần duy nhất lúc module được import.
-_BOT_ID = int(TOKEN.split(":")[0])
-_CACHED_BOT_USER = User(id=_BOT_ID, is_bot=True, first_name="Bot")
-
-
-async def _bo_qua_get_me(self, *args, **kwargs):
-    self._bot_user = _CACHED_BOT_USER
-    return _CACHED_BOT_USER
-
-
 from telegram import Bot as _TelegramBot  # noqa: E402
-_TelegramBot.get_me = _bo_qua_get_me
+
+_get_me_goc = _TelegramBot.get_me
+_cached_bot_user = None
+
+
+async def _get_me_co_cache(self, *args, **kwargs):
+    global _cached_bot_user
+    if _cached_bot_user is not None:
+        self._bot_user = _cached_bot_user
+        return _cached_bot_user
+    ket_qua_that = await _get_me_goc(self, *args, **kwargs)
+    _cached_bot_user = ket_qua_that
+    return ket_qua_that
+
+
+_TelegramBot.get_me = _get_me_co_cache
 
 
 async def process_update(update_data: dict):
