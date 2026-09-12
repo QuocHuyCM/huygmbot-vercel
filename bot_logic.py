@@ -470,18 +470,25 @@ async def setwarnlimit(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def setbiomutedays(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
     if not context.args or not context.args[0].isdigit():
+        hien_tai = get_setting(chat_id, "bio_mute_days", 0)
+        hien_tai_text = f"{hien_tai} ngày" if hien_tai and hien_tai > 0 else "vĩnh viễn"
         await update.message.reply_text(
             f"⚠️ Cách dùng: /setbiomutedays 3  (số ngày mute khi bio chứa link)\n"
-            f"Hiện tại: {get_setting(update.message.chat_id, 'bio_mute_days', 3)} ngày"
+            f"Dùng /setbiomutedays 0 để đặt VĨNH VIỄN.\n"
+            f"Hiện tại: {hien_tai_text}"
         )
         return
     so_ngay = int(context.args[0])
-    if so_ngay < 1:
-        await update.message.reply_text("⚠️ Số ngày phải từ 1 trở lên!")
+    if so_ngay < 0:
+        await update.message.reply_text("⚠️ Số ngày phải từ 0 trở lên (0 = vĩnh viễn)!")
         return
-    save_setting(update.message.chat_id, "bio_mute_days", so_ngay)
-    await update.message.reply_text(f"✅ Đã đặt thời gian mute do bio chứa link: {so_ngay} ngày!")
+    save_setting(chat_id, "bio_mute_days", so_ngay)
+    if so_ngay == 0:
+        await update.message.reply_text("✅ Đã đặt mute do bio chứa link: VĨNH VIỄN!")
+    else:
+        await update.message.reply_text(f"✅ Đã đặt thời gian mute do bio chứa link: {so_ngay} ngày!")
 
 
 def _ve_ban_phim_chon_admin(admin_users, da_chon_ids):
@@ -584,6 +591,40 @@ async def xu_ly_nut_da_go_link(update: Update, context: ContextTypes.DEFAULT_TYP
 
     chat_id = query.message.chat_id
 
+    # Kiểm tra lại bio ngay lúc bấm nút — nếu đã gỡ link thật thì tự mở mute luôn
+    try:
+        user_info = await context.bot.get_chat(uid_trong_nut)
+        bio_hien_tai = getattr(user_info, "bio", None) or ""
+    except Exception:
+        bio_hien_tai = None
+
+    if bio_hien_tai is not None and not co_link_trong_bio(bio_hien_tai):
+        try:
+            await context.bot.restrict_chat_member(
+                chat_id, uid_trong_nut,
+                permissions=quyen_mo_day_du()
+            )
+        except Exception:
+            pass
+        remove_muted_user(uid_trong_nut, chat_id)
+        await query.answer("✅ Đã kiểm tra: bio không còn link, mở mute thành công!", show_alert=True)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        try:
+            await context.bot.send_message(
+                chat_id,
+                f"✅ {get_mention(query.from_user)} đã gỡ link khỏi bio và được tự động mở mute!",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+        return
+
+    # Vẫn còn link (hoặc không đọc được bio) — hiện danh sách admin để liên hệ thủ công
+    await query.answer("⚠️ Bio vẫn còn link (hoặc không kiểm tra được) — dưới đây là danh sách admin!", show_alert=True)
+
     da_chon = get_selected_admins(chat_id)
     if da_chon:
         ds_hien = [(uid, fname, uname) for uid, fname, uname in da_chon]
@@ -592,7 +633,6 @@ async def xu_ly_nut_da_go_link(update: Update, context: ContextTypes.DEFAULT_TYP
         try:
             admins = await context.bot.get_chat_administrators(chat_id)
         except Exception:
-            await query.answer("⚠️ Không lấy được danh sách admin, thử lại sau!", show_alert=True)
             return
         ds_hien = [
             (a.user.id, a.user.first_name or "", a.user.username or "")
@@ -600,7 +640,6 @@ async def xu_ly_nut_da_go_link(update: Update, context: ContextTypes.DEFAULT_TYP
         ][:so_luong]
 
     if not ds_hien:
-        await query.answer("⚠️ Nhóm chưa có admin nào được ghi nhận!", show_alert=True)
         return
 
     text = "👮 Liên hệ admin để được mở mute:\n\n"
@@ -608,7 +647,6 @@ async def xu_ly_nut_da_go_link(update: Update, context: ContextTypes.DEFAULT_TYP
         mention = f"@{uname}" if uname else f'<a href="tg://user?id={uid}">{fname or uid}</a>'
         text += f"• {mention}\n"
 
-    await query.answer()
     try:
         await context.bot.send_message(chat_id, text, parse_mode="HTML")
     except Exception:
@@ -843,8 +881,13 @@ async def check_bio_khi_chat(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     mention = get_mention(user)
-    so_ngay_mute_bio = get_setting(chat_id, "bio_mute_days", 3)
-    until_date_bio = datetime.datetime.now() + datetime.timedelta(days=so_ngay_mute_bio)
+    so_ngay_mute_bio = get_setting(chat_id, "bio_mute_days", 0)  # 0 = vĩnh viễn (mặc định)
+    if so_ngay_mute_bio and so_ngay_mute_bio > 0:
+        until_date_bio = datetime.datetime.now() + datetime.timedelta(days=so_ngay_mute_bio)
+        thoi_han_text = f"{so_ngay_mute_bio} ngày"
+    else:
+        until_date_bio = None
+        thoi_han_text = "vĩnh viễn"
     try:
         await context.bot.restrict_chat_member(
             chat_id, user.id,
@@ -861,7 +904,7 @@ async def check_bio_khi_chat(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await context.bot.send_message(
         chat_id,
-        f"⚠️ {mention} đã bị mute tự động <b>{so_ngay_mute_bio} ngày</b>!\n"
+        f"⚠️ {mention} đã bị mute tự động <b>{thoi_han_text}</b>!\n"
         f"📋 Lý do: Bio chứa link.\n"
         f"🔗 Bio: <code>{bio[:200]}</code>\n"
         f"💡 Nếu bạn đã gỡ link ở Bio, bấm nút bên dưới để xem danh sách admin liên hệ mở mute.",
