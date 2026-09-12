@@ -80,6 +80,14 @@ c.execute("""CREATE TABLE IF NOT EXISTS selected_admins (
     PRIMARY KEY (chat_id, user_id)
 )""")
 
+c.execute("""CREATE TABLE IF NOT EXISTS last_notifications (
+    chat_id TEXT,
+    notify_key TEXT,
+    message_id BIGINT,
+    noi_dung TEXT,
+    PRIMARY KEY (chat_id, notify_key)
+)""")
+
 conn.commit()
 conn.close()
 print("✅ Đã tạo/cập nhật xong các bảng trong Supabase.")

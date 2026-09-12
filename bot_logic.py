@@ -133,6 +133,32 @@ def get_muted_users(chat_id=None):
     return rows
 
 
+# ---------- Chống thông báo trùng lặp ----------
+def get_last_notification(chat_id, notify_key):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT message_id, noi_dung FROM last_notifications WHERE chat_id = %s AND notify_key = %s",
+              (str(chat_id), notify_key))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return row[0], row[1]
+    return None, None
+
+
+def save_last_notification(chat_id, notify_key, message_id, noi_dung):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO last_notifications (chat_id, notify_key, message_id, noi_dung)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (chat_id, notify_key) DO UPDATE
+        SET message_id = %s, noi_dung = %s
+    """, (str(chat_id), notify_key, message_id, noi_dung, message_id, noi_dung))
+    conn.commit()
+    conn.close()
+
+
 # ---------- Danh sách admin được chọn để hiển thị (nút "Tôi đã gỡ link") ----------
 def is_admin_selected(chat_id, user_id):
     conn = get_conn()
@@ -334,6 +360,33 @@ def get_mention(user):
     if user.username:
         return f"@{user.username}"
     return f'<a href="tg://user?id={user.id}">{user.first_name}</a>'
+
+
+async def gui_thong_bao_khong_trung(context, chat_id, text, notify_key, **kwargs):
+    """Gửi 1 thông báo vào nhóm. Nếu thông báo TRƯỚC ĐÓ cùng notify_key có
+    nội dung GIỐNG HỆT thông báo mới này, tự xóa thông báo cũ trước — tránh
+    lặp lại nhiều lần cùng 1 nội dung khi 1 người liên tục vi phạm.
+    notify_key nên gồm loại thông báo + id người liên quan, ví dụ
+    f"blocklist:{user.id}", để không xóa nhầm thông báo của người khác."""
+    try:
+        msg_id_cu, noi_dung_cu = get_last_notification(chat_id, notify_key)
+    except Exception:
+        msg_id_cu, noi_dung_cu = None, None
+
+    if msg_id_cu and noi_dung_cu == text:
+        try:
+            await context.bot.delete_message(chat_id, msg_id_cu)
+        except Exception:
+            pass
+
+    sent = await context.bot.send_message(chat_id, text, **kwargs)
+
+    try:
+        save_last_notification(chat_id, notify_key, sent.message_id, text)
+    except Exception:
+        pass
+
+    return sent
 
 
 # ==================== START ====================
@@ -591,22 +644,9 @@ async def xu_ly_nut_da_go_link(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     chat_id = query.message.chat_id
+    await query.answer("⏳ Đang kiểm tra bio...")
 
-    # Trả lời ngay để tắt vòng xoay loading trên nút, rồi báo đang chờ kiểm tra
-    await query.answer("⏳ Đang chờ kiểm tra lại bio (~10 giây)...")
-    try:
-        await context.bot.send_message(
-            chat_id,
-            f"⏳ Đang kiểm tra lại bio của {get_mention(query.from_user)}, vui lòng chờ khoảng 10 giây "
-            f"(Telegram đôi khi cần chút thời gian để cập nhật bio mới)...",
-            parse_mode="HTML"
-        )
-    except Exception:
-        pass
-
-    await asyncio.sleep(10)
-
-    # Kiểm tra lại bio sau khi chờ — nếu đã gỡ link thật thì tự mở mute luôn
+    # Kiểm tra lại bio ngay lúc bấm nút — nếu đã gỡ link thật thì tự mở mute luôn
     try:
         user_info = await context.bot.get_chat(uid_trong_nut)
         bio_hien_tai = getattr(user_info, "bio", None) or ""
@@ -924,12 +964,13 @@ async def check_bio_khi_chat(update: Update, context: ContextTypes.DEFAULT_TYPE)
         InlineKeyboardButton("✅ Tôi đã gỡ link", callback_data=f"biolink:{user.id}")
     ]])
 
-    await context.bot.send_message(
-        chat_id,
+    await gui_thong_bao_khong_trung(
+        context, chat_id,
         f"⚠️ {mention} đã bị mute tự động <b>{thoi_han_text}</b>!\n"
         f"📋 Lý do: Bio chứa link.\n"
         f"🔗 Bio: <code>{bio[:200]}</code>\n"
         f"💡 Nếu bạn đã gỡ link ở Bio, bấm nút bên dưới để được gỡ mute.",
+        notify_key=f"biomute:{user.id}",
         parse_mode="HTML",
         reply_markup=ban_phim
     )
@@ -1362,9 +1403,10 @@ async def loc_noi_dung_cam(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         try:
-            await context.bot.send_message(
-                chat_id,
+            await gui_thong_bao_khong_trung(
+                context, chat_id,
                 f"🗑️ Tin nhắn của {mention} đã bị xóa vì chứa {ly_do_xoa}.",
+                notify_key=f"blocklist:{user.id}",
                 parse_mode="HTML"
             )
         except Exception:
@@ -1479,7 +1521,11 @@ async def lockurl_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ly_do = "Gửi nội dung bị khóa (/lockurl): " + ", ".join(danh_sach_vi_pham)
     canh_bao_msg = await ap_dung_canh_bao(context, chat_id, user.id, mention, ly_do)
     try:
-        await context.bot.send_message(chat_id, canh_bao_msg, parse_mode="HTML")
+        await gui_thong_bao_khong_trung(
+            context, chat_id, canh_bao_msg,
+            notify_key=f"lockurl:{user.id}",
+            parse_mode="HTML"
+        )
     except Exception:
         pass
 
