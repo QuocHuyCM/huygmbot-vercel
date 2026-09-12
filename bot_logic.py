@@ -1,4 +1,5 @@
 import os
+import asyncio
 import datetime
 from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -591,7 +592,21 @@ async def xu_ly_nut_da_go_link(update: Update, context: ContextTypes.DEFAULT_TYP
 
     chat_id = query.message.chat_id
 
-    # Kiểm tra lại bio ngay lúc bấm nút — nếu đã gỡ link thật thì tự mở mute luôn
+    # Trả lời ngay để tắt vòng xoay loading trên nút, rồi báo đang chờ kiểm tra
+    await query.answer("⏳ Đang chờ kiểm tra lại bio (~10 giây)...")
+    try:
+        await context.bot.send_message(
+            chat_id,
+            f"⏳ Đang kiểm tra lại bio của {get_mention(query.from_user)}, vui lòng chờ khoảng 10 giây "
+            f"(Telegram đôi khi cần chút thời gian để cập nhật bio mới)...",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+    await asyncio.sleep(10)
+
+    # Kiểm tra lại bio sau khi chờ — nếu đã gỡ link thật thì tự mở mute luôn
     try:
         user_info = await context.bot.get_chat(uid_trong_nut)
         bio_hien_tai = getattr(user_info, "bio", None) or ""
@@ -607,7 +622,6 @@ async def xu_ly_nut_da_go_link(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception:
             pass
         remove_muted_user(uid_trong_nut, chat_id)
-        await query.answer("✅ Đã kiểm tra: bio không còn link, mở mute thành công!", show_alert=True)
         try:
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
@@ -623,7 +637,15 @@ async def xu_ly_nut_da_go_link(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     # Vẫn còn link (hoặc không đọc được bio) — hiện danh sách admin để liên hệ thủ công
-    await query.answer("⚠️ Bio vẫn còn link (hoặc không kiểm tra được) — dưới đây là danh sách admin!", show_alert=True)
+    try:
+        await context.bot.send_message(
+            chat_id,
+            f"⚠️ Bio của {get_mention(query.from_user)} vẫn còn link (hoặc bot không kiểm tra được). "
+            f"Danh sách admin để liên hệ mở mute:",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
 
     da_chon = get_selected_admins(chat_id)
     if da_chon:
@@ -907,7 +929,7 @@ async def check_bio_khi_chat(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"⚠️ {mention} đã bị mute tự động <b>{thoi_han_text}</b>!\n"
         f"📋 Lý do: Bio chứa link.\n"
         f"🔗 Bio: <code>{bio[:200]}</code>\n"
-        f"💡 Nếu bạn đã gỡ link ở Bio, bấm nút bên dưới để xem danh sách admin liên hệ mở mute.",
+        f"💡 Nếu bạn đã gỡ link ở Bio, bấm nút bên dưới để được gỡ mute.",
         parse_mode="HTML",
         reply_markup=ban_phim
     )
